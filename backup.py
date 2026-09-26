@@ -77,7 +77,6 @@ def fix_balance_sync():
     cur.execute('SELECT * FROM "Users_Balance";')
     cols = [d[0] for d in cur.description]
     rows = cur.fetchall()
-
     cur.execute('DELETE FROM "users";')
     conn.commit()
     inserted = 0
@@ -97,14 +96,12 @@ def fix_balance_sync():
                 if v is None or str(v).lower() in ('none','','null'): return None
                 try: return int(float(str(v)))
                 except: return None
-
             uid = parse_int(d.get('user_id'))
             if uid == 0: continue
             bal = parse_int(d.get('balance'))
             ref_by = parse_bigint(d.get('referred_by'))
             ref_count = parse_int(d.get('referral_count'))
             ref_earn = parse_float(d.get('total_referral_earning'))
-
             cur.execute('INSERT INTO "users" (user_id, balance, referred_by, referral_count, total_referral_earning) VALUES (%s,%s,%s,%s,%s)', (uid, bal, ref_by, ref_count, ref_earn))
             inserted += 1
             total_bal += bal
@@ -114,14 +111,11 @@ def fix_balance_sync():
             cur = conn.cursor()
             continue
     conn.commit()
-
-    # ONLY sync users_balance, DON'T touch orders/stock - to keep new orders safe
     try:
         cur.execute('DELETE FROM "users_balance"; INSERT INTO "users_balance" SELECT * FROM "users";')
         conn.commit()
     except:
         conn.rollback()
-
     cur.close()
     conn.close()
     return inserted, total_bal
@@ -148,7 +142,60 @@ def register_backup_handlers(bot):
         bot.reply_to(message, "⏳ Fixing balance (orders safe)...")
         try:
             count, total = fix_balance_sync()
-            bot.reply_to(message, f"✅ Balance Fixed! Orders NOT deleted.\n\n👥 Users: {count}\n💰 Total Balance: {total}")
+            bot.reply_to(message, f"✅ Balance Fixed!\n\n👥 Users: {count}\n💰 Total Balance: {total}")
         except Exception as e:
             bot.reply_to(message, f"❌ Fix Failed: {e}")
-            print(e)
+
+    @bot.message_handler(commands=['debugorders'])
+    def handle_debugorders(message):
+        if message.from_user.id != ADMIN_ID: return
+        try:
+            conn = get_conn()
+            cur = conn.cursor()
+            # Check lower case orders
+            try:
+                cur.execute('SELECT COUNT(*) FROM "orders";')
+                cnt_lower = cur.fetchone()[0]
+                cur.execute("SELECT COUNT(*) FROM \"orders\" WHERE status ILIKE 'pending';")
+                pend_lower = cur.fetchone()[0]
+                cur.execute('SELECT * FROM "orders" ORDER BY id DESC LIMIT 3;')
+                last_lower = cur.fetchall()
+                cols_lower = [d[0] for d in cur.description]
+            except Exception as e:
+                cnt_lower = f"error: {e}"
+                pend_lower = 0
+                last_lower = []
+                cols_lower = []
+                conn.rollback()
+                cur = conn.cursor()
+            # Check Capital Orders
+            try:
+                cur.execute('SELECT COUNT(*) FROM "Orders";')
+                cnt_cap = cur.fetchone()[0]
+                cur.execute("SELECT COUNT(*) FROM \"Orders\" WHERE status ILIKE 'pending';")
+                pend_cap = cur.fetchone()[0]
+                cur.execute('SELECT * FROM "Orders" ORDER BY id DESC LIMIT 3;')
+                last_cap = cur.fetchall()
+                cols_cap = [d[0] for d in cur.description]
+            except Exception as e:
+                cnt_cap = f"error: {e}"
+                pend_cap = 0
+                last_cap = []
+                cols_cap = []
+                conn.rollback()
+            
+            msg = f"📊 Orders Debug:\n\n"
+            msg += f"orders (lower): {cnt_lower} rows, pending: {pend_lower}\n"
+            msg += f"Orders (Capital): {cnt_cap} rows, pending: {pend_cap}\n\n"
+            msg += f"Last in orders:\n"
+            for r in last_lower[:2]:
+                msg += f"{dict(zip(cols_lower, r))}\n"
+            msg += f"\nLast in Orders:\n"
+            for r in last_cap[:2]:
+                msg += f"{dict(zip(cols_cap, r))}\n"
+            
+            bot.reply_to(message, msg[:4000])
+            cur.close()
+            conn.close()
+        except Exception as e:
+            bot.reply_to(message, f"Debug failed: {e}")
