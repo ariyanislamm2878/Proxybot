@@ -74,67 +74,66 @@ def restore_from_xlsx(file_path):
 def fix_balance_sync():
     conn = get_conn()
     cur = conn.cursor()
-    # Step 1: Get all data from Users_Balance as text and clean
     cur.execute('SELECT * FROM "Users_Balance";')
     cols = [d[0] for d in cur.description]
     rows = cur.fetchall()
-    print(f"Users_Balance has {len(rows)} rows, cols {cols}")
+    print(f"Users_Balance has {len(rows)} rows")
 
-    # Find correct source - if Users_Balance empty, try users_balance or Users_Balance lowercase check
-    if len(rows) < 10:
-        try:
-            cur.execute('SELECT * FROM "users_balance";')
-            rows2 = cur.fetchall()
-            if len(rows2) > len(rows):
-                rows = rows2
-                cols = [d[0] for d in cur.description]
-                print(f"Using users_balance with {len(rows)} rows")
-        except: pass
-
-    # Now insert into users table row by row with casting
     cur.execute('DELETE FROM "users";')
     conn.commit()
     inserted = 0
     total_bal = 0
+    skipped = 0
     for r in rows:
         try:
             d = dict(zip(cols, r))
-            uid = int(str(d.get('user_id') or d.get('USER_ID') or 0))
-            bal = int(float(str(d.get('balance') or 0)))
-            ref_by = d.get('referred_by')
-            ref_count = int(str(d.get('referral_count') or 0))
-            ref_earn = int(str(d.get('total_referral_earning') or 0))
-            # handle None string
-            if ref_by in ('None', '', 'null'): ref_by = None
-            else:
-                try: ref_by = int(ref_by) if ref_by else None
-                except: ref_by = None
+            # Robust parsing - handle float, None, 'None' string
+            def parse_int(v, default=0):
+                if v is None or v == '' or str(v).lower() == 'none': return default
+                try: return int(float(str(v)))
+                except: return default
+            def parse_float(v, default=0):
+                if v is None or v == '' or str(v).lower() == 'none': return default
+                try: return float(str(v))
+                except: return default
+            def parse_bigint(v):
+                if v is None or str(v).lower() in ('none','','null'): return None
+                try: return int(float(str(v)))
+                except: return None
+
+            uid = parse_int(d.get('user_id'))
+            if uid == 0: continue
+            bal = parse_int(d.get('balance'))
+            ref_by = parse_bigint(d.get('referred_by'))
+            ref_count = parse_int(d.get('referral_count'))
+            ref_earn = parse_float(d.get('total_referral_earning'))
+
             cur.execute('INSERT INTO "users" (user_id, balance, referred_by, referral_count, total_referral_earning) VALUES (%s,%s,%s,%s,%s)', (uid, bal, ref_by, ref_count, ref_earn))
             inserted += 1
             total_bal += bal
         except Exception as e:
+            skipped += 1
             print(f"skip row {r}: {e}")
             conn.rollback()
             cur = conn.cursor()
             continue
     conn.commit()
+    print(f"Inserted {inserted}, skipped {skipped}")
 
-    # Also sync to lower tables
-    try:
-        cur.execute('DELETE FROM "users_balance";')
-        cur.execute('INSERT INTO "users_balance" SELECT * FROM "users";')
-        conn.commit()
-    except:
-        conn.rollback()
-
-    try:
-        cur.execute('DELETE FROM "orders"; INSERT INTO "orders" SELECT * FROM "Orders";')
-        cur.execute('DELETE FROM "stock_available"; INSERT INTO "stock_available" SELECT * FROM "Stock_Available";')
-        cur.execute('DELETE FROM "stock_used"; INSERT INTO "stock_used" SELECT * FROM "Stock_Used";')
-        cur.execute('DELETE FROM "referrals"; INSERT INTO "referrals" SELECT * FROM "Referrals";')
-        conn.commit()
-    except:
-        conn.rollback()
+    # Sync other tables - ignore errors
+    for q in [
+        'DELETE FROM "users_balance"; INSERT INTO "users_balance" SELECT * FROM "users";',
+        'DELETE FROM "orders"; INSERT INTO "orders" SELECT * FROM "Orders";',
+        'DELETE FROM "stock_available"; INSERT INTO "stock_available" SELECT * FROM "Stock_Available";',
+        'DELETE FROM "stock_used"; INSERT INTO "stock_used" SELECT * FROM "Stock_Used";',
+        'DELETE FROM "referrals"; INSERT INTO "referrals" SELECT * FROM "Referrals";'
+    ]:
+        try:
+            cur.execute(q)
+            conn.commit()
+        except:
+            conn.rollback()
+            cur = conn.cursor()
 
     cur.close()
     conn.close()
@@ -145,21 +144,21 @@ def register_backup_handlers(bot):
     def handle_restore(message):
         if message.from_user.id != ADMIN_ID: return
         if not message.caption or "RESTORE" not in message.caption.upper(): return
-        bot.reply_to(message, "⏳ Restoring to PostgreSQL...")
+        bot.reply_to(message, "⏳ Restoring...")
         try:
             file_info = bot.get_file(message.document.file_id)
             downloaded = bot.download_file(file_info.file_path)
             tmp_path = "/tmp/restore.xlsx"
             with open(tmp_path, 'wb') as f: f.write(downloaded)
             count = restore_from_xlsx(tmp_path)
-            bot.reply_to(message, f"✅ Restore Successful! {count} rows restored\n\nEbar /fixbalance dao")
+            bot.reply_to(message, f"✅ Restore Successful! {count} rows\n\nEbar /fixbalance dao")
         except Exception as e:
             bot.reply_to(message, f"❌ Restore Failed: {e}")
 
     @bot.message_handler(commands=['fixbalance'])
     def handle_fixbalance(message):
         if message.from_user.id != ADMIN_ID: return
-        bot.reply_to(message, "⏳ Fixing balance... syncing 254 users -> users table")
+        bot.reply_to(message, "⏳ Fixing balance...")
         try:
             count, total = fix_balance_sync()
             bot.reply_to(message, f"✅ Balance Fixed!\n\n👥 Users: {count}\n💰 Total Balance: {total}\n\nEbar /start diye check koro")
