@@ -16,6 +16,8 @@ def create_backup_excel():
     wb = Workbook()
     wb.remove(wb.active)
     for table in tables:
+        if table.lower() != table:  # Skip Capital tables - only backup lowercase
+            continue
         if table.startswith("pg_") or table.startswith("sql_"): continue
         ws = wb.create_sheet(title=table[:30])
         try:
@@ -45,26 +47,25 @@ def restore_from_xlsx(file_path):
         rows = list(ws.values)
         if not rows or len(rows) < 2: continue
         headers = [str(h).strip() for h in rows[0] if h]
-        for tbl in set([sheet_name, sheet_name.lower()]):
-            cols_def = ", ".join([f'"{c.lower()}" TEXT' for c in headers])
-            try:
-                cur.execute(f'CREATE TABLE IF NOT EXISTS "{tbl}" ({cols_def});')
-                cur.execute(f'TRUNCATE TABLE "{tbl}" RESTART IDENTITY CASCADE;')
-            except:
-                conn.rollback()
-                cur = conn.cursor()
+        tbl = sheet_name.lower()  # ONLY lowercase - no duplicate!
+        cols_def = ", ".join([f'"{c.lower()}" TEXT' for c in headers])
+        try:
+            cur.execute(f'CREATE TABLE IF NOT EXISTS "{tbl}" ({cols_def});')
+            cur.execute(f'TRUNCATE TABLE "{tbl}" RESTART IDENTITY CASCADE;')
+        except:
+            conn.rollback()
+            cur = conn.cursor()
         conn.commit()
         for r in rows[1:]:
             if not r or not any(v is not None and str(v) != "" for v in r): continue
             r = list(r)[:len(headers)] + [None]*(len(headers)-len(r))
             cols = ", ".join([f'"{c.lower()}"' for c in headers])
             ph = ", ".join(["%s"]*len(headers))
-            for tbl in set([sheet_name, sheet_name.lower()]):
-                try:
-                    cur.execute(f'INSERT INTO "{tbl}" ({cols}) VALUES ({ph})', r)
-                except:
-                    conn.rollback()
-                    cur = conn.cursor()
+            try:
+                cur.execute(f'INSERT INTO "{tbl}" ({cols}) VALUES ({ph})', r)
+            except:
+                conn.rollback()
+                cur = conn.cursor()
             restored += 1
     conn.commit()
     cur.close()
@@ -74,7 +75,16 @@ def restore_from_xlsx(file_path):
 def fix_balance_sync():
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute('SELECT * FROM "Users_Balance";')
+    # Only from users_balance lowercase if exists, else Users_Balance
+    try:
+        cur.execute('SELECT * FROM "users_balance" LIMIT 1;')
+        src = "users_balance"
+    except:
+        conn.rollback()
+        cur = conn.cursor()
+        src = "Users_Balance"
+    
+    cur.execute(f'SELECT * FROM "{src}";')
     cols = [d[0] for d in cur.description]
     rows = cur.fetchall()
     cur.execute('DELETE FROM "users";')
@@ -124,35 +134,35 @@ def register_backup_handlers(bot):
     def handle_restore(message):
         if message.from_user.id != ADMIN_ID: return
         if not message.caption or "RESTORE" not in message.caption.upper(): return
-        bot.reply_to(message, "⏳ Restoring...")
+        bot.reply_to(message, "⏳ Restoring (lowercase only)...")
         try:
             file_info = bot.get_file(message.document.file_id)
             downloaded = bot.download_file(file_info.file_path)
             tmp_path = "/tmp/restore.xlsx"
             with open(tmp_path, 'wb') as f: f.write(downloaded)
             count = restore_from_xlsx(tmp_path)
-            bot.reply_to(message, f"✅ Restore Successful! {count} rows\nEbar /fixbalance dao")
+            bot.reply_to(message, f"✅ Restore Successful! {count} rows (no duplicates)\nEbar /fixbalance dao")
         except Exception as e:
             bot.reply_to(message, f"❌ Restore Failed: {e}")
 
     @bot.message_handler(commands=['fixbalance'])
     def handle_fixbalance(message):
         if message.from_user.id != ADMIN_ID: return
-        bot.reply_to(message, "⏳ Fixing balance...")
+        bot.reply_to(message, "⏳ Fixing...")
         try:
             count, total = fix_balance_sync()
-            bot.reply_to(message, f"✅ Balance Fixed!\n👥 Users: {count}\n💰 Total: {total}")
+            bot.reply_to(message, f"✅ Fixed!\n👥 Users: {count}\n💰 Total: {total}")
         except Exception as e:
             bot.reply_to(message, f"❌ Fix Failed: {e}")
 
-    @bot.message_handler(commands=['debugorders','checkstatus'])
+    @bot.message_handler(commands=['clearstock','debugorders','checkstatus'])
     def handle_checkstatus(message):
         if message.from_user.id != ADMIN_ID: return
         try:
             conn = get_conn()
             cur = conn.cursor()
-            msg = "📊 Status:\n\n"
-            for tbl in ['orders', 'Stock_Available', 'stock_available']:
+            msg = ""
+            for tbl in ['orders','stock_available','users']:
                 try:
                     cur.execute(f'SELECT COUNT(*) FROM "{tbl}";')
                     cnt = cur.fetchone()[0]
@@ -163,32 +173,40 @@ def register_backup_handlers(bot):
             cur.execute(f'SELECT status, COUNT(*) FROM "orders" GROUP BY status;')
             for s,c in cur.fetchall():
                 msg += f"orders {s}: {c}\n"
-            bot.reply_to(message, msg)
+            bot.reply_to(message, f"📊\n{msg}")
             cur.close()
             conn.close()
         except Exception as e:
             bot.reply_to(message, f"Failed: {e}")
 
-    @bot.message_handler(commands=['clearstock'])
-    def handle_clearstock(message):
+    @bot.message_handler(commands=['fixduplicates'])
+    def handle_fixduplicates(message):
         if message.from_user.id != ADMIN_ID: return
+        bot.reply_to(message, "⏳ Fixing duplicates - capital tables deleting...")
         try:
             conn = get_conn()
             cur = conn.cursor()
-            # Clear BOTH tables
-            for tbl in ['Stock_Available', 'stock_available', 'stock_used', 'Stock_Used']:
+            # List of capital tables to DROP
+            capital_tables = ['Orders', 'Referrals', 'Stock_Available', 'Stock_Used', 'Users_Balance', 'Users', 'Stock']
+            dropped = []
+            for tbl in capital_tables:
+                try:
+                    cur.execute(f'DROP TABLE IF EXISTS "{tbl}" CASCADE;')
+                    conn.commit()
+                    dropped.append(tbl)
+                except:
+                    conn.rollback()
+                    cur = conn.cursor()
+            # Clear stock lowercase
+            for tbl in ['stock_available','stock_used']:
                 try:
                     cur.execute(f'TRUNCATE TABLE "{tbl}" RESTART IDENTITY CASCADE;')
                     conn.commit()
                 except:
                     conn.rollback()
                     cur = conn.cursor()
-            cur.execute('SELECT COUNT(*) FROM "Stock_Available";')
-            cnt1 = cur.fetchone()[0]
-            cur.execute('SELECT COUNT(*) FROM "stock_available";')
-            cnt2 = cur.fetchone()[0]
-            bot.reply_to(message, f"✅ All old stock cleared!\n\nStock_Available: {cnt1}\nstock_available: {cnt2}\n\nEbar notun stock add koro ba manual order test koro - ebar pending e asbe!")
+            bot.reply_to(message, f"✅ Duplicates fixed!\nDropped: {', '.join(dropped)}\n\nEbar bot restart dao Railway te, ar stock 0 hoye jabe. Pending orders ebar thik dekhabe!")
             cur.close()
             conn.close()
         except Exception as e:
-            bot.reply_to(message, f"❌ Clear failed: {e}")
+            bot.reply_to(message, f"❌ Failed: {e}")
