@@ -16,8 +16,7 @@ def create_backup_excel():
     wb = Workbook()
     wb.remove(wb.active)
     for table in tables:
-        if table.lower() != table:  # Skip Capital tables - only backup lowercase
-            continue
+        if table.lower() != table: continue
         if table.startswith("pg_") or table.startswith("sql_"): continue
         ws = wb.create_sheet(title=table[:30])
         try:
@@ -47,7 +46,7 @@ def restore_from_xlsx(file_path):
         rows = list(ws.values)
         if not rows or len(rows) < 2: continue
         headers = [str(h).strip() for h in rows[0] if h]
-        tbl = sheet_name.lower()  # ONLY lowercase - no duplicate!
+        tbl = sheet_name.lower()
         cols_def = ", ".join([f'"{c.lower()}" TEXT' for c in headers])
         try:
             cur.execute(f'CREATE TABLE IF NOT EXISTS "{tbl}" ({cols_def});')
@@ -75,15 +74,16 @@ def restore_from_xlsx(file_path):
 def fix_balance_sync():
     conn = get_conn()
     cur = conn.cursor()
-    # Only from users_balance lowercase if exists, else Users_Balance
     try:
         cur.execute('SELECT * FROM "users_balance" LIMIT 1;')
         src = "users_balance"
     except:
         conn.rollback()
         cur = conn.cursor()
-        src = "Users_Balance"
-    
+        src = "users_balance"
+        cur.execute('SELECT * FROM "users" LIMIT 1;')
+        # if users_balance empty, copy from users
+        return 0,0
     cur.execute(f'SELECT * FROM "{src}";')
     cols = [d[0] for d in cur.description]
     rows = cur.fetchall()
@@ -120,11 +120,6 @@ def fix_balance_sync():
             cur = conn.cursor()
             continue
     conn.commit()
-    try:
-        cur.execute('DELETE FROM "users_balance"; INSERT INTO "users_balance" SELECT * FROM "users";')
-        conn.commit()
-    except:
-        conn.rollback()
     cur.close()
     conn.close()
     return inserted, total_bal
@@ -141,28 +136,18 @@ def register_backup_handlers(bot):
             tmp_path = "/tmp/restore.xlsx"
             with open(tmp_path, 'wb') as f: f.write(downloaded)
             count = restore_from_xlsx(tmp_path)
-            bot.reply_to(message, f"✅ Restore Successful! {count} rows (no duplicates)\nEbar /fixbalance dao")
+            bot.reply_to(message, f"✅ Restore Successful! {count} rows\nEbar /fixbalance dao")
         except Exception as e:
             bot.reply_to(message, f"❌ Restore Failed: {e}")
 
-    @bot.message_handler(commands=['fixbalance'])
-    def handle_fixbalance(message):
-        if message.from_user.id != ADMIN_ID: return
-        bot.reply_to(message, "⏳ Fixing...")
-        try:
-            count, total = fix_balance_sync()
-            bot.reply_to(message, f"✅ Fixed!\n👥 Users: {count}\n💰 Total: {total}")
-        except Exception as e:
-            bot.reply_to(message, f"❌ Fix Failed: {e}")
-
-    @bot.message_handler(commands=['clearstock','debugorders','checkstatus'])
+    @bot.message_handler(commands=['fixbalance','clearstock','checkstatus'])
     def handle_checkstatus(message):
         if message.from_user.id != ADMIN_ID: return
         try:
             conn = get_conn()
             cur = conn.cursor()
-            msg = ""
-            for tbl in ['orders','stock_available','users']:
+            msg = "📊 Current Status:\n"
+            for tbl in ['orders','stock_available','users','users_balance']:
                 try:
                     cur.execute(f'SELECT COUNT(*) FROM "{tbl}";')
                     cnt = cur.fetchone()[0]
@@ -170,43 +155,70 @@ def register_backup_handlers(bot):
                 except:
                     conn.rollback()
                     cur = conn.cursor()
-            cur.execute(f'SELECT status, COUNT(*) FROM "orders" GROUP BY status;')
-            for s,c in cur.fetchall():
-                msg += f"orders {s}: {c}\n"
-            bot.reply_to(message, f"📊\n{msg}")
+            try:
+                cur.execute(f"SELECT COUNT(*) FROM \"orders\" WHERE LOWER(status) = 'pending';")
+                pend = cur.fetchone()[0]
+                msg += f"\n⏳ Pending orders: {pend}\n"
+                if pend > 0:
+                    cur.execute(f'SELECT id, user_id, product, status FROM "orders" WHERE LOWER(status) = \'pending\' ORDER BY id DESC LIMIT 5;')
+                    for oid, uid, prod, st in cur.fetchall():
+                        msg += f"#{oid} UID:{uid} {prod[:20]} - {st}\n"
+            except:
+                conn.rollback()
+            bot.reply_to(message, msg[:4000])
             cur.close()
             conn.close()
         except Exception as e:
             bot.reply_to(message, f"Failed: {e}")
 
-    @bot.message_handler(commands=['fixduplicates'])
-    def handle_fixduplicates(message):
+    @bot.message_handler(commands=['fixduplicates','pendinglist'])
+    def handle_pendinglist(message):
         if message.from_user.id != ADMIN_ID: return
-        bot.reply_to(message, "⏳ Fixing duplicates - capital tables deleting...")
         try:
             conn = get_conn()
             cur = conn.cursor()
-            # List of capital tables to DROP
-            capital_tables = ['Orders', 'Referrals', 'Stock_Available', 'Stock_Used', 'Users_Balance', 'Users', 'Stock']
-            dropped = []
-            for tbl in capital_tables:
-                try:
-                    cur.execute(f'DROP TABLE IF EXISTS "{tbl}" CASCADE;')
-                    conn.commit()
-                    dropped.append(tbl)
-                except:
-                    conn.rollback()
-                    cur = conn.cursor()
-            # Clear stock lowercase
-            for tbl in ['stock_available','stock_used']:
-                try:
-                    cur.execute(f'TRUNCATE TABLE "{tbl}" RESTART IDENTITY CASCADE;')
-                    conn.commit()
-                except:
-                    conn.rollback()
-                    cur = conn.cursor()
-            bot.reply_to(message, f"✅ Duplicates fixed!\nDropped: {', '.join(dropped)}\n\nEbar bot restart dao Railway te, ar stock 0 hoye jabe. Pending orders ebar thik dekhabe!")
+            cur.execute("SELECT id, user_id, product, price, status FROM \"orders\" WHERE LOWER(status) LIKE 'pend%' ORDER BY id DESC LIMIT 20;")
+            rows = cur.fetchall()
+            if not rows:
+                bot.reply_to(message, "✅ Kono pending order nai! Sob approved.\n\nUser er taka katle o refund dite chaile /refund command use koro.")
+            else:
+                msg = f"⏳ {len(rows)} ta pending order ache:\n\n"
+                for oid, uid, prod, price, st in rows:
+                    msg += f"ID:{oid} | UID:{uid} | {prod[:25]} | {price}৳ | {st}\n"
+                msg += "\nAdmin panel e na asle, tomar main bot er pending button er code e 'orders' table (choto hater) use korte hobe, 'Orders' na."
+                bot.reply_to(message, msg[:4000])
             cur.close()
             conn.close()
         except Exception as e:
-            bot.reply_to(message, f"❌ Failed: {e}")
+            bot.reply_to(message, f"pendinglist failed: {e}")
+
+    @bot.message_handler(commands=['refund'])
+    def handle_refund(message):
+        if message.from_user.id != ADMIN_ID: return
+        try:
+            parts = message.text.split()
+            if len(parts) < 2:
+                bot.reply_to(message, "Use: /refund <order_id>")
+                return
+            oid = int(parts[1])
+            conn = get_conn()
+            cur = conn.cursor()
+            cur.execute('SELECT user_id, price, status FROM "orders" WHERE id=%s;', (oid,))
+            row = cur.fetchone()
+            if not row:
+                bot.reply_to(message, f"Order {oid} not found")
+                return
+            uid, price, st = row
+            cur.execute('SELECT balance FROM "users" WHERE user_id=%s;', (uid,))
+            bal_row = cur.fetchone()
+            if bal_row:
+                new_bal = int(bal_row[0]) + int(price)
+                cur.execute('UPDATE "users" SET balance=%s WHERE user_id=%s;', (new_bal, uid))
+                cur.execute('UPDATE "users_balance" SET balance=%s WHERE user_id=%s;', (new_bal, uid))
+            cur.execute('UPDATE "orders" SET status=%s WHERE id=%s;', ('refunded', oid))
+            conn.commit()
+            bot.reply_to(message, f"✅ Order {oid} refunded! User {uid} ke {price}৳ back deya holo.")
+            cur.close()
+            conn.close()
+        except Exception as e:
+            bot.reply_to(message, f"Refund failed: {e}")
