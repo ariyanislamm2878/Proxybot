@@ -77,17 +77,14 @@ def fix_balance_sync():
     cur.execute('SELECT * FROM "Users_Balance";')
     cols = [d[0] for d in cur.description]
     rows = cur.fetchall()
-    print(f"Users_Balance has {len(rows)} rows")
 
     cur.execute('DELETE FROM "users";')
     conn.commit()
     inserted = 0
     total_bal = 0
-    skipped = 0
     for r in rows:
         try:
             d = dict(zip(cols, r))
-            # Robust parsing - handle float, None, 'None' string
             def parse_int(v, default=0):
                 if v is None or v == '' or str(v).lower() == 'none': return default
                 try: return int(float(str(v)))
@@ -112,28 +109,18 @@ def fix_balance_sync():
             inserted += 1
             total_bal += bal
         except Exception as e:
-            skipped += 1
             print(f"skip row {r}: {e}")
             conn.rollback()
             cur = conn.cursor()
             continue
     conn.commit()
-    print(f"Inserted {inserted}, skipped {skipped}")
 
-    # Sync other tables - ignore errors
-    for q in [
-        'DELETE FROM "users_balance"; INSERT INTO "users_balance" SELECT * FROM "users";',
-        'DELETE FROM "orders"; INSERT INTO "orders" SELECT * FROM "Orders";',
-        'DELETE FROM "stock_available"; INSERT INTO "stock_available" SELECT * FROM "Stock_Available";',
-        'DELETE FROM "stock_used"; INSERT INTO "stock_used" SELECT * FROM "Stock_Used";',
-        'DELETE FROM "referrals"; INSERT INTO "referrals" SELECT * FROM "Referrals";'
-    ]:
-        try:
-            cur.execute(q)
-            conn.commit()
-        except:
-            conn.rollback()
-            cur = conn.cursor()
+    # ONLY sync users_balance, DON'T touch orders/stock - to keep new orders safe
+    try:
+        cur.execute('DELETE FROM "users_balance"; INSERT INTO "users_balance" SELECT * FROM "users";')
+        conn.commit()
+    except:
+        conn.rollback()
 
     cur.close()
     conn.close()
@@ -158,10 +145,10 @@ def register_backup_handlers(bot):
     @bot.message_handler(commands=['fixbalance'])
     def handle_fixbalance(message):
         if message.from_user.id != ADMIN_ID: return
-        bot.reply_to(message, "⏳ Fixing balance...")
+        bot.reply_to(message, "⏳ Fixing balance (orders safe)...")
         try:
             count, total = fix_balance_sync()
-            bot.reply_to(message, f"✅ Balance Fixed!\n\n👥 Users: {count}\n💰 Total Balance: {total}\n\nEbar /start diye check koro")
+            bot.reply_to(message, f"✅ Balance Fixed! Orders NOT deleted.\n\n👥 Users: {count}\n💰 Total Balance: {total}")
         except Exception as e:
             bot.reply_to(message, f"❌ Fix Failed: {e}")
             print(e)
