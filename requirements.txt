@@ -1,4 +1,3 @@
 pyTelegramBotAPI
 requests[socks]
 openpyxl
-psycopg2-binary
