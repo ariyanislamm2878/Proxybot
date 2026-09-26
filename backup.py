@@ -105,8 +105,7 @@ def fix_balance_sync():
             cur.execute('INSERT INTO "users" (user_id, balance, referred_by, referral_count, total_referral_earning) VALUES (%s,%s,%s,%s,%s)', (uid, bal, ref_by, ref_count, ref_earn))
             inserted += 1
             total_bal += bal
-        except Exception as e:
-            print(f"skip row {r}: {e}")
+        except:
             conn.rollback()
             cur = conn.cursor()
             continue
@@ -132,17 +131,17 @@ def register_backup_handlers(bot):
             tmp_path = "/tmp/restore.xlsx"
             with open(tmp_path, 'wb') as f: f.write(downloaded)
             count = restore_from_xlsx(tmp_path)
-            bot.reply_to(message, f"✅ Restore Successful! {count} rows\n\nEbar /fixbalance dao")
+            bot.reply_to(message, f"✅ Restore Successful! {count} rows\nEbar /fixbalance dao")
         except Exception as e:
             bot.reply_to(message, f"❌ Restore Failed: {e}")
 
     @bot.message_handler(commands=['fixbalance'])
     def handle_fixbalance(message):
         if message.from_user.id != ADMIN_ID: return
-        bot.reply_to(message, "⏳ Fixing balance (orders safe)...")
+        bot.reply_to(message, "⏳ Fixing balance...")
         try:
             count, total = fix_balance_sync()
-            bot.reply_to(message, f"✅ Balance Fixed!\n\n👥 Users: {count}\n💰 Total Balance: {total}")
+            bot.reply_to(message, f"✅ Balance Fixed!\n👥 Users: {count}\n💰 Total: {total}")
         except Exception as e:
             bot.reply_to(message, f"❌ Fix Failed: {e}")
 
@@ -152,50 +151,51 @@ def register_backup_handlers(bot):
         try:
             conn = get_conn()
             cur = conn.cursor()
-            # Check lower case orders
-            try:
-                cur.execute('SELECT COUNT(*) FROM "orders";')
-                cnt_lower = cur.fetchone()[0]
-                cur.execute("SELECT COUNT(*) FROM \"orders\" WHERE status ILIKE 'pending';")
-                pend_lower = cur.fetchone()[0]
-                cur.execute('SELECT * FROM "orders" ORDER BY id DESC LIMIT 3;')
-                last_lower = cur.fetchall()
-                cols_lower = [d[0] for d in cur.description]
-            except Exception as e:
-                cnt_lower = f"error: {e}"
-                pend_lower = 0
-                last_lower = []
-                cols_lower = []
-                conn.rollback()
-                cur = conn.cursor()
-            # Check Capital Orders
-            try:
-                cur.execute('SELECT COUNT(*) FROM "Orders";')
-                cnt_cap = cur.fetchone()[0]
-                cur.execute("SELECT COUNT(*) FROM \"Orders\" WHERE status ILIKE 'pending';")
-                pend_cap = cur.fetchone()[0]
-                cur.execute('SELECT * FROM "Orders" ORDER BY id DESC LIMIT 3;')
-                last_cap = cur.fetchall()
-                cols_cap = [d[0] for d in cur.description]
-            except Exception as e:
-                cnt_cap = f"error: {e}"
-                pend_cap = 0
-                last_cap = []
-                cols_cap = []
-                conn.rollback()
-            
-            msg = f"📊 Orders Debug:\n\n"
-            msg += f"orders (lower): {cnt_lower} rows, pending: {pend_lower}\n"
-            msg += f"Orders (Capital): {cnt_cap} rows, pending: {pend_cap}\n\n"
-            msg += f"Last in orders:\n"
-            for r in last_lower[:2]:
-                msg += f"{dict(zip(cols_lower, r))}\n"
-            msg += f"\nLast in Orders:\n"
-            for r in last_cap[:2]:
-                msg += f"{dict(zip(cols_cap, r))}\n"
-            
-            bot.reply_to(message, msg[:4000])
+            cur.execute('SELECT COUNT(*) FROM "orders";')
+            cnt_lower = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM \"orders\" WHERE status ILIKE 'pending';")
+            pend_lower = cur.fetchone()[0]
+            cur.execute('SELECT COUNT(*) FROM "Orders";')
+            cnt_cap = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM \"Orders\" WHERE status ILIKE 'pending';")
+            pend_cap = cur.fetchone()[0]
+            bot.reply_to(message, f"orders lower: {cnt_lower} total, {pend_lower} pending\nOrders Capital: {cnt_cap} total, {pend_cap} pending")
             cur.close()
             conn.close()
         except Exception as e:
             bot.reply_to(message, f"Debug failed: {e}")
+
+    @bot.message_handler(commands=['checkstatus'])
+    def handle_checkstatus(message):
+        if message.from_user.id != ADMIN_ID: return
+        try:
+            conn = get_conn()
+            cur = conn.cursor()
+            msg = "📊 Orders Status Breakdown:\n\n"
+            for tbl in ['orders', 'Orders']:
+                try:
+                    cur.execute(f'SELECT status, COUNT(*) FROM "{tbl}" GROUP BY status;')
+                    rows = cur.fetchall()
+                    msg += f"{tbl}:\n"
+                    for status, cnt in rows:
+                        msg += f"  {status}: {cnt}\n"
+                    msg += "\n"
+                except:
+                    conn.rollback()
+                    cur = conn.cursor()
+            # stock check
+            try:
+                cur.execute('SELECT COUNT(*) FROM "Stock_Available";')
+                stock_cnt = cur.fetchone()[0]
+                msg += f"Stock_Available: {stock_cnt} items\n"
+                cur.execute('SELECT COUNT(*) FROM "stock_available";')
+                stock_cnt2 = cur.fetchone()[0]
+                msg += f"stock_available (lower): {stock_cnt2} items\n"
+            except:
+                msg += "Stock table error\n"
+                conn.rollback()
+            bot.reply_to(message, msg[:4000])
+            cur.close()
+            conn.close()
+        except Exception as e:
+            bot.reply_to(message, f"checkstatus failed: {e}")
