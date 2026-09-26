@@ -40,92 +40,108 @@ def restore_from_xlsx(file_path):
     conn = get_conn()
     cur = conn.cursor()
     wb = load_workbook(file_path)
-
     cur.execute("SELECT tablename FROM pg_tables WHERE schemaname='public';")
-    existing = {t[0].lower(): t[0] for t in cur.fetchall()}
-
     restored = 0
     for sheet_name in wb.sheetnames:
         ws = wb[sheet_name]
         rows = list(ws.values)
-        if not rows or len(rows) < 2:
-            continue
+        if not rows or len(rows) < 2: continue
         headers = [str(h).strip() for h in rows[0] if h]
-        # Original case table name preserve korbo
-        table_original = sheet_name  # Users_Balance
-        table_lower = sheet_name.lower()  # users_balance
-
-        # 1. Original case e table create
+        table_original = sheet_name
+        table_lower = sheet_name.lower()
         cols_def = ", ".join([f'"{c.lower()}" TEXT' for c in headers])
-        try:
-            cur.execute(f'CREATE TABLE IF NOT EXISTS "{table_original}" ({cols_def});')
-            conn.commit()
-        except Exception as e:
-            print(f"Create {table_original} fail: {e}")
-            conn.rollback()
-            cur = conn.cursor()
-
-        # 2. Lower case e o table create (bot jate 2 vabei pay)
-        if table_original != table_lower:
+        for tbl in set([table_original, table_lower]):
             try:
-                cur.execute(f'CREATE TABLE IF NOT EXISTS "{table_lower}" ({cols_def});')
-                conn.commit()
-                existing[table_lower] = table_lower
+                cur.execute(f'CREATE TABLE IF NOT EXISTS "{tbl}" ({cols_def});')
+                cur.execute(f'TRUNCATE TABLE "{tbl}" RESTART IDENTITY CASCADE;')
             except:
                 conn.rollback()
                 cur = conn.cursor()
-
-        # Truncate both
-        for tbl in [table_original, table_lower]:
-            try:
-                cur.execute(f'TRUNCATE TABLE "{tbl}" RESTART IDENTITY CASCADE;')
-            except:
                 try:
+                    cur.execute(f'CREATE TABLE IF NOT EXISTS "{tbl}" ({cols_def});')
                     cur.execute(f'DELETE FROM "{tbl}";')
                 except:
-                    conn.rollback()
-                    cur = conn.cursor()
+                    continue
         conn.commit()
-
-        # Insert into both tables
         for r in rows[1:]:
-            if not r or not any(v is not None and str(v) != "" for v in r):
-                continue
+            if not r or not any(v is not None and str(v) != "" for v in r): continue
             r = list(r)[:len(headers)] + [None]*(len(headers)-len(r))
             cols = ", ".join([f'"{c.lower()}"' for c in headers])
             ph = ", ".join(["%s"]*len(headers))
             for tbl in set([table_original, table_lower]):
                 try:
                     cur.execute(f'INSERT INTO "{tbl}" ({cols}) VALUES ({ph})', r)
-                except Exception as e:
-                    print(f"Skip {tbl}: {e}")
+                except:
                     conn.rollback()
                     cur = conn.cursor()
-                    continue
             restored += 1
-
     conn.commit()
     cur.close()
     conn.close()
-    print(f"Restored {restored} rows total")
     return restored
+
+def fix_balance_sync():
+    conn = get_conn()
+    cur = conn.cursor()
+    # Sync Users_Balance -> users, users_balance
+    try:
+        cur.execute('TRUNCATE TABLE "users" CASCADE;')
+        cur.execute('INSERT INTO "users" SELECT * FROM "Users_Balance";')
+    except Exception as e:
+        conn.rollback()
+        cur = conn.cursor()
+        try:
+            cur.execute('DELETE FROM "users";')
+            cur.execute('INSERT INTO "users" (user_id, balance, referred_by, referral_count, total_referral_earning) SELECT user_id::bigint, balance::int, referred_by, referral_count::int, total_referral_earning::int FROM "Users_Balance";')
+        except Exception as e2:
+            print(f"users sync fail: {e2}")
+            conn.rollback()
+    try:
+        cur.execute('TRUNCATE TABLE "users_balance" CASCADE;')
+        cur.execute('INSERT INTO "users_balance" SELECT * FROM "Users_Balance";')
+    except:
+        conn.rollback()
+    try:
+        cur.execute('TRUNCATE TABLE "orders" CASCADE; INSERT INTO "orders" SELECT * FROM "Orders";')
+    except: conn.rollback()
+    try:
+        cur.execute('TRUNCATE TABLE "stock_available" CASCADE; INSERT INTO "stock_available" SELECT * FROM "Stock_Available";')
+    except: conn.rollback()
+    try:
+        cur.execute('TRUNCATE TABLE "stock_used" CASCADE; INSERT INTO "stock_used" SELECT * FROM "Stock_Used";')
+    except: conn.rollback()
+    try:
+        cur.execute('TRUNCATE TABLE "referrals" CASCADE; INSERT INTO "referrals" SELECT * FROM "Referrals";')
+    except: conn.rollback()
+    conn.commit()
+    cur.execute('SELECT COUNT(*), SUM(balance::int) FROM "users";')
+    count, total = cur.fetchone()
+    cur.close()
+    conn.close()
+    return count, total
 
 def register_backup_handlers(bot):
     @bot.message_handler(content_types=['document'])
     def handle_restore(message):
-        if message.from_user.id != ADMIN_ID:
-            return
-        if not message.caption or "RESTORE" not in message.caption.upper():
-            return
+        if message.from_user.id != ADMIN_ID: return
+        if not message.caption or "RESTORE" not in message.caption.upper(): return
         bot.reply_to(message, "⏳ Restoring to PostgreSQL...")
         try:
             file_info = bot.get_file(message.document.file_id)
             downloaded = bot.download_file(file_info.file_path)
             tmp_path = "/tmp/restore.xlsx"
-            with open(tmp_path, 'wb') as f:
-                f.write(downloaded)
+            with open(tmp_path, 'wb') as f: f.write(downloaded)
             count = restore_from_xlsx(tmp_path)
-            bot.reply_to(message, f"✅ Restore Successful! {count} rows restored (balance included)")
+            bot.reply_to(message, f"✅ Restore Successful! {count} rows restored")
         except Exception as e:
             bot.reply_to(message, f"❌ Restore Failed: {e}")
-            print(f"Restore error: {e}")
+
+    @bot.message_handler(commands=['fixbalance'])
+    def handle_fixbalance(message):
+        if message.from_user.id != ADMIN_ID: return
+        bot.reply_to(message, "⏳ Fixing balance... syncing Users_Balance -> users")
+        try:
+            count, total = fix_balance_sync()
+            bot.reply_to(message, f"✅ Balance Fixed!\n\n👥 Users: {count}\n💰 Total Balance: {total}\n\nEbar /start diye check koro")
+        except Exception as e:
+            bot.reply_to(message, f"❌ Fix Failed: {e}")
