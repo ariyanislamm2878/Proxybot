@@ -26,9 +26,7 @@ def create_backup_excel():
             ws.append(cols)
             for r in rows:
                 ws.append([str(x) if x is not None else None for x in r])
-        except Exception as e:
-            print(f"Backup skip {table}: {e}")
-            continue
+        except: continue
     path = "/tmp/ProxyStore_Backup.xlsx"
     wb.save(path)
     cur.close()
@@ -44,62 +42,73 @@ def restore_from_xlsx(file_path):
     wb = load_workbook(file_path)
 
     cur.execute("SELECT tablename FROM pg_tables WHERE schemaname='public';")
-    existing_tables = {t[0].lower(): t[0] for t in cur.fetchall()}
+    existing = {t[0].lower(): t[0] for t in cur.fetchall()}
 
-    restored_count = 0
+    restored = 0
     for sheet_name in wb.sheetnames:
-        sheet = wb[sheet_name]
-        rows = list(sheet.values)
+        ws = wb[sheet_name]
+        rows = list(ws.values)
         if not rows or len(rows) < 2:
             continue
+        headers = [str(h).strip() for h in rows[0] if h]
+        # Original case table name preserve korbo
+        table_original = sheet_name  # Users_Balance
+        table_lower = sheet_name.lower()  # users_balance
 
-        headers = [str(h).strip().lower() for h in rows[0] if h]
-        if not headers:
-            continue
+        # 1. Original case e table create
+        cols_def = ", ".join([f'"{c.lower()}" TEXT' for c in headers])
+        try:
+            cur.execute(f'CREATE TABLE IF NOT EXISTS "{table_original}" ({cols_def});')
+            conn.commit()
+        except Exception as e:
+            print(f"Create {table_original} fail: {e}")
+            conn.rollback()
+            cur = conn.cursor()
 
-        real_table = existing_tables.get(sheet_name.lower())
-
-        # Table na thakle create koro
-        if not real_table:
-            real_table = sheet_name.lower()
-            cols_def = ", ".join([f'"{c}" TEXT' for c in headers])
+        # 2. Lower case e o table create (bot jate 2 vabei pay)
+        if table_original != table_lower:
             try:
-                cur.execute(f'CREATE TABLE IF NOT EXISTS "{real_table}" ({cols_def});')
+                cur.execute(f'CREATE TABLE IF NOT EXISTS "{table_lower}" ({cols_def});')
                 conn.commit()
-                existing_tables[real_table.lower()] = real_table
-                print(f"Created table {real_table}")
-            except Exception as e:
-                print(f"Create table failed {real_table}: {e}")
+                existing[table_lower] = table_lower
+            except:
                 conn.rollback()
                 cur = conn.cursor()
-                continue
 
-        # Table khali koro
-        try:
-            cur.execute(f'TRUNCATE TABLE "{real_table}" RESTART IDENTITY CASCADE;')
-        except:
-            cur.execute(f'DELETE FROM "{real_table}";')
-        
-        # Insert
+        # Truncate both
+        for tbl in [table_original, table_lower]:
+            try:
+                cur.execute(f'TRUNCATE TABLE "{tbl}" RESTART IDENTITY CASCADE;')
+            except:
+                try:
+                    cur.execute(f'DELETE FROM "{tbl}";')
+                except:
+                    conn.rollback()
+                    cur = conn.cursor()
+        conn.commit()
+
+        # Insert into both tables
         for r in rows[1:]:
             if not r or not any(v is not None and str(v) != "" for v in r):
                 continue
             r = list(r)[:len(headers)] + [None]*(len(headers)-len(r))
-            cols = ", ".join([f'"{c}"' for c in headers])
+            cols = ", ".join([f'"{c.lower()}"' for c in headers])
             ph = ", ".join(["%s"]*len(headers))
-            try:
-                cur.execute(f'INSERT INTO "{real_table}" ({cols}) VALUES ({ph})', r)
-                restored_count += 1
-            except Exception as e:
-                print(f"Skip row in {real_table}: {e}")
-                conn.rollback()
-                cur = conn.cursor()
-                continue
+            for tbl in set([table_original, table_lower]):
+                try:
+                    cur.execute(f'INSERT INTO "{tbl}" ({cols}) VALUES ({ph})', r)
+                except Exception as e:
+                    print(f"Skip {tbl}: {e}")
+                    conn.rollback()
+                    cur = conn.cursor()
+                    continue
+            restored += 1
 
     conn.commit()
     cur.close()
     conn.close()
-    return restored_count
+    print(f"Restored {restored} rows total")
+    return restored
 
 def register_backup_handlers(bot):
     @bot.message_handler(content_types=['document'])
@@ -108,7 +117,6 @@ def register_backup_handlers(bot):
             return
         if not message.caption or "RESTORE" not in message.caption.upper():
             return
-
         bot.reply_to(message, "⏳ Restoring to PostgreSQL...")
         try:
             file_info = bot.get_file(message.document.file_id)
@@ -116,9 +124,8 @@ def register_backup_handlers(bot):
             tmp_path = "/tmp/restore.xlsx"
             with open(tmp_path, 'wb') as f:
                 f.write(downloaded)
-
             count = restore_from_xlsx(tmp_path)
-            bot.reply_to(message, f"✅ Restore Successful! {count} rows restored to PostgreSQL")
+            bot.reply_to(message, f"✅ Restore Successful! {count} rows restored (balance included)")
         except Exception as e:
             bot.reply_to(message, f"❌ Restore Failed: {e}")
             print(f"Restore error: {e}")
