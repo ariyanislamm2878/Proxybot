@@ -43,32 +43,47 @@ def restore_from_xlsx(file_path):
     cur = conn.cursor()
     wb = load_workbook(file_path)
 
-    # Postgres er sob table er list (lowercase map)
     cur.execute("SELECT tablename FROM pg_tables WHERE schemaname='public';")
     existing_tables = {t[0].lower(): t[0] for t in cur.fetchall()}
 
     restored_count = 0
     for sheet_name in wb.sheetnames:
-        real_table = existing_tables.get(sheet_name.lower())
-        if not real_table:
-            print(f"Table not found for sheet {sheet_name}, skipping")
-            continue
-
         sheet = wb[sheet_name]
         rows = list(sheet.values)
         if not rows or len(rows) < 2:
             continue
 
-        headers = [str(h).lower() for h in rows[0]]
+        headers = [str(h).strip().lower() for h in rows[0] if h]
+        if not headers:
+            continue
+
+        real_table = existing_tables.get(sheet_name.lower())
+
+        # Table na thakle create koro
+        if not real_table:
+            real_table = sheet_name.lower()
+            cols_def = ", ".join([f'"{c}" TEXT' for c in headers])
+            try:
+                cur.execute(f'CREATE TABLE IF NOT EXISTS "{real_table}" ({cols_def});')
+                conn.commit()
+                existing_tables[real_table.lower()] = real_table
+                print(f"Created table {real_table}")
+            except Exception as e:
+                print(f"Create table failed {real_table}: {e}")
+                conn.rollback()
+                cur = conn.cursor()
+                continue
 
         # Table khali koro
-        cur.execute(f'TRUNCATE TABLE "{real_table}" RESTART IDENTITY CASCADE;')
-
+        try:
+            cur.execute(f'TRUNCATE TABLE "{real_table}" RESTART IDENTITY CASCADE;')
+        except:
+            cur.execute(f'DELETE FROM "{real_table}";')
+        
         # Insert
         for r in rows[1:]:
-            if not any(v is not None and str(v) != "" for v in r):
+            if not r or not any(v is not None and str(v) != "" for v in r):
                 continue
-            # row length header er soman koro
             r = list(r)[:len(headers)] + [None]*(len(headers)-len(r))
             cols = ", ".join([f'"{c}"' for c in headers])
             ph = ", ".join(["%s"]*len(headers))
