@@ -145,57 +145,50 @@ def register_backup_handlers(bot):
         except Exception as e:
             bot.reply_to(message, f"❌ Fix Failed: {e}")
 
-    @bot.message_handler(commands=['debugorders'])
-    def handle_debugorders(message):
-        if message.from_user.id != ADMIN_ID: return
-        try:
-            conn = get_conn()
-            cur = conn.cursor()
-            cur.execute('SELECT COUNT(*) FROM "orders";')
-            cnt_lower = cur.fetchone()[0]
-            cur.execute("SELECT COUNT(*) FROM \"orders\" WHERE status ILIKE 'pending';")
-            pend_lower = cur.fetchone()[0]
-            cur.execute('SELECT COUNT(*) FROM "Orders";')
-            cnt_cap = cur.fetchone()[0]
-            cur.execute("SELECT COUNT(*) FROM \"Orders\" WHERE status ILIKE 'pending';")
-            pend_cap = cur.fetchone()[0]
-            bot.reply_to(message, f"orders lower: {cnt_lower} total, {pend_lower} pending\nOrders Capital: {cnt_cap} total, {pend_cap} pending")
-            cur.close()
-            conn.close()
-        except Exception as e:
-            bot.reply_to(message, f"Debug failed: {e}")
-
-    @bot.message_handler(commands=['checkstatus'])
+    @bot.message_handler(commands=['debugorders','checkstatus'])
     def handle_checkstatus(message):
         if message.from_user.id != ADMIN_ID: return
         try:
             conn = get_conn()
             cur = conn.cursor()
-            msg = "📊 Orders Status Breakdown:\n\n"
-            for tbl in ['orders', 'Orders']:
+            msg = "📊 Status:\n\n"
+            for tbl in ['orders', 'Stock_Available', 'stock_available']:
                 try:
-                    cur.execute(f'SELECT status, COUNT(*) FROM "{tbl}" GROUP BY status;')
-                    rows = cur.fetchall()
-                    msg += f"{tbl}:\n"
-                    for status, cnt in rows:
-                        msg += f"  {status}: {cnt}\n"
-                    msg += "\n"
+                    cur.execute(f'SELECT COUNT(*) FROM "{tbl}";')
+                    cnt = cur.fetchone()[0]
+                    msg += f"{tbl}: {cnt}\n"
                 except:
                     conn.rollback()
                     cur = conn.cursor()
-            # stock check
-            try:
-                cur.execute('SELECT COUNT(*) FROM "Stock_Available";')
-                stock_cnt = cur.fetchone()[0]
-                msg += f"Stock_Available: {stock_cnt} items\n"
-                cur.execute('SELECT COUNT(*) FROM "stock_available";')
-                stock_cnt2 = cur.fetchone()[0]
-                msg += f"stock_available (lower): {stock_cnt2} items\n"
-            except:
-                msg += "Stock table error\n"
-                conn.rollback()
-            bot.reply_to(message, msg[:4000])
+            cur.execute(f'SELECT status, COUNT(*) FROM "orders" GROUP BY status;')
+            for s,c in cur.fetchall():
+                msg += f"orders {s}: {c}\n"
+            bot.reply_to(message, msg)
             cur.close()
             conn.close()
         except Exception as e:
-            bot.reply_to(message, f"checkstatus failed: {e}")
+            bot.reply_to(message, f"Failed: {e}")
+
+    @bot.message_handler(commands=['clearstock'])
+    def handle_clearstock(message):
+        if message.from_user.id != ADMIN_ID: return
+        try:
+            conn = get_conn()
+            cur = conn.cursor()
+            # Clear BOTH tables
+            for tbl in ['Stock_Available', 'stock_available', 'stock_used', 'Stock_Used']:
+                try:
+                    cur.execute(f'TRUNCATE TABLE "{tbl}" RESTART IDENTITY CASCADE;')
+                    conn.commit()
+                except:
+                    conn.rollback()
+                    cur = conn.cursor()
+            cur.execute('SELECT COUNT(*) FROM "Stock_Available";')
+            cnt1 = cur.fetchone()[0]
+            cur.execute('SELECT COUNT(*) FROM "stock_available";')
+            cnt2 = cur.fetchone()[0]
+            bot.reply_to(message, f"✅ All old stock cleared!\n\nStock_Available: {cnt1}\nstock_available: {cnt2}\n\nEbar notun stock add koro ba manual order test koro - ebar pending e asbe!")
+            cur.close()
+            conn.close()
+        except Exception as e:
+            bot.reply_to(message, f"❌ Clear failed: {e}")
